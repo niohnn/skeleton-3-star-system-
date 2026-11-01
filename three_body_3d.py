@@ -76,6 +76,71 @@ void main() {
     frag_color = vec4(vertex_color, 1.0);
 }
 """
+BODY_VERTEX_SHADER = """
+#version 330
+
+in vec3 in_position;
+in vec3 in_color;
+in float in_size;
+
+uniform mat4 view;
+uniform mat4 projection;
+
+out vec3 vertex_color;
+flat out vec3 view_center;
+flat out float point_size;
+
+void main() {
+    vec4 center = view * vec4(in_position, 1.0);
+
+    view_center = center.xyz;
+    vertex_color = in_color;
+    point_size = in_size;
+
+    gl_Position = projection * center;
+    gl_PointSize = in_size;
+}
+"""
+
+BODY_FRAGMENT_SHADER = """
+#version 330
+
+in vec3 vertex_color;
+flat in vec3 view_center;
+flat in float point_size;
+
+uniform mat4 projection;
+uniform float viewport_height;
+
+out vec4 frag_color;
+
+void main() {
+    vec2 p = (gl_PointCoord - vec2(0.5)) * 2.0;
+
+    float r2 = dot(p, p);
+
+    if (r2 > 1.0) {
+        discard;
+    }
+
+    float depth = -view_center.z;
+
+    float radius = point_size * depth /
+                   (projection[1][1] * viewport_height);
+
+    float z = sqrt(1.0 - r2);
+
+    vec3 surface_position = view_center +
+        vec3(p.x * radius, p.y * radius, z * radius);
+
+    vec4 clip_position = projection * vec4(surface_position, 1.0);
+
+    gl_FragDepth = (clip_position.z / clip_position.w) * 0.5 + 0.5;
+
+    frag_color = vec4(vertex_color, 1.0);
+}
+"""
+
 
 # ============================================================
 # THREE STARS
@@ -549,6 +614,11 @@ point_program = ctx.program(
     fragment_shader=FRAGMENT_SHADER,
 )
 
+body_program = ctx.program(
+    vertex_shader=BODY_VERTEX_SHADER,
+    fragment_shader=BODY_FRAGMENT_SHADER,
+)
+
 line_program = ctx.program(
     vertex_shader=LINE_VERTEX_SHADER,
     fragment_shader=LINE_FRAGMENT_SHADER,
@@ -569,7 +639,7 @@ background_vao = ctx.vertex_array(
 # Dynamic body buffer.
 body_buffer = ctx.buffer(reserve=NUM_BODIES * 7 * 4)
 body_vao = ctx.vertex_array(
-    point_program,
+    body_program,
     [(body_buffer, "3f 3f 1f",
       "in_position", "in_color", "in_size")],
 )
@@ -909,6 +979,10 @@ try:
 
         mvp = projection @ view
 
+        body_program["view"].write(view.T.astype("f4").tobytes())
+        body_program["projection"].write(projection.T.astype("f4").tobytes())
+        body_program["viewport_height"].value = float(height)
+
         point_program["mvp"].write(mvp.T.astype("f4").tobytes())
         line_program["mvp"].write(mvp.T.astype("f4").tobytes())
 
@@ -955,12 +1029,8 @@ finally:
     body_buffer.release()
     point_program.release()
     line_program.release()
+    body_program.release()
     ctx.release()
-
-    glfw.destroy_window(window)
-    glfw.terminate()
-
-
 
 
     glfw.destroy_window(window)
