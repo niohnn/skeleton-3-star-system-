@@ -316,6 +316,28 @@ collision_radii = np.concatenate([
     star_radii_au,
     planet_radii_au
 ])
+# Planet volumes in km cube
+planet_volumes_km3 = (
+    (4.0 / 3.0) * math.pi * (planet_radii_au * AU_METERS / 1000.0)**3
+)
+#update planet physics
+def update_planet_physics(body_index):
+    planet_index = body_index - NUM_STARS
+
+    volume_m3 = planet_volumes_km3[planet_index] * 1e9
+    mass_kg = masses[body_index] * SOLAR_MASS_KG
+    density_kg_m3 = mass_kg / volume_m3
+    planet_densities[planet_index] = density_kg_m3 / 1000.0
+
+    radius_km = (
+        3.0 * planet_volumes_km3[planet_index] / (4.0 * math.pi)
+    ) ** (1.0 / 3.0)
+
+    radius_au = radius_km * 1000.0 / AU_METERS
+    planet_radii_au[planet_index] = radius_au
+    collision_radii[body_index] = radius_au
+
+    return planet_densities[planet_index]
 
 
 
@@ -324,20 +346,34 @@ collision_radii = np.concatenate([
 # ============================================================
 
 def acceleration(pos):
-    # delta[i, j] points from body i toward body j.
-    delta = pos[None, :, :] - pos[:, None, :]
-    distance_sq = np.sum(delta * delta, axis=2)
+    accelerations = np.zeros_like(pos)
 
-    np.fill_diagonal(distance_sq, np.inf)
-    distance_sq = np.maximum(distance_sq, 1e-12)
+    for i in range(NUM_BODIES):
+        for j in range(NUM_BODIES):
+            if i == j:
+                continue
 
-    inv_distance_cubed = distance_sq ** (-1.5)
+            # Direction from body i towards body j.
+            delta = pos[j] - pos[i]
+            distance = np.linalg.norm(delta)
 
-    return G * np.sum(
-        delta
-        * (masses[None, :, None] * inv_distance_cubed[:, :, None]),
-        axis=1,
-    )
+            if distance < 1e-12:
+                continue
+
+            radius = collision_radii[j]
+            mass = masses[j]
+
+            if distance >= radius:
+                # Outside the spherical body: Newtonian point-mass gravity.
+                factor = G * mass / distance**3
+            else:
+                # Inside a uniform-density sphere:
+                # gravitational acceleration is proportional to distance.
+                factor = G * mass / radius**3
+
+            accelerations[i] += factor * delta
+
+    return accelerations
 
 
 def physics_step():
@@ -373,6 +409,7 @@ def detect_collision(pos):
 
     return None    
 
+
 #body controls init for gui
 
 def set_body_value(sender, app_data, user_data):
@@ -391,11 +428,19 @@ def set_body_value(sender, app_data, user_data):
     elif property_name == "mass":
         masses[body_index] = app_data
 
+        if body_index >= NUM_STARS:
+            update_planet_physics(body_index)
+
         for i in range(NUM_BODIES):
             history[i].clear()
             history[i].append(
                 (simulation_years, positions[i].copy())
             )
+
+    elif property_name == "volume":
+        planet_index = body_index - NUM_STARS
+        planet_volumes_km3[planet_index] = app_data
+        update_planet_physics(body_index)
 
     elif property_name == "size":
         body_sizes[body_index] = app_data
@@ -461,6 +506,22 @@ def add_body_controls(body_index, body_name):
             user_data=("mass", body_index, None),
             width=200
         )
+
+        # Only planets have volume and density controls.
+        if body_index >= NUM_STARS:
+            planet_index = body_index - NUM_STARS
+
+            dpg.add_input_float(
+                label="Volume (km³)",
+                default_value=float(planet_volumes_km3[planet_index]),
+                callback=set_body_value,
+                user_data=("volume", body_index, None),
+                width=200
+            )
+
+            dpg.add_text(
+                f"Density: {planet_densities[planet_index]:.3f} g/cm³"
+            )
 
         dpg.add_input_float(
             label="Visual Size",
