@@ -4,6 +4,8 @@ import moderngl
 import numpy as np
 import math
 import time
+import threading
+import dearpygui.dearpygui as dpg
 
 # ============================================================
 # SETTINGS
@@ -17,6 +19,13 @@ TRAIL_UPDATE_INTERVAL = 0.10
 
 G = 4.0 * math.pi**2  # AU^3 / (solar mass * year^2)
 C_AU_PER_YEAR = 63241.077
+# Simulation controls
+paused = False
+time_scale = 1.0
+star_scale = 1.0
+planet_scale = 1.0
+show_planets = True
+show_trails = True
 
 # ============================================================
 # SHADERS
@@ -197,6 +206,11 @@ body_sizes = np.array([
     5, 5, 6, 6, 6, 7,        # rocky planets
     9, 10, 11, 12,            # gas giants
 ], dtype=np.float32)
+#save originals for reset
+initial_positions = positions.copy()
+initial_velocities = velocities.copy()
+initial_masses = masses.copy()
+initial_body_sizes = body_sizes.copy()
 
 # Calculate physical planet radii from mass and density.
 SOLAR_MASS_KG = 1.98847e30
@@ -245,12 +259,113 @@ def physics_step():
     a1 = acceleration(positions)
     velocities += 0.5 * a1 * DT
 
+#body controls init for gui
+
+def set_body_value(sender, app_data, user_data):
+    property_name, body_index, component = user_data
+
+    if property_name == "position":
+        positions[body_index, component] = app_data
+        history[body_index].clear()
+        history[body_index].append(
+            (simulation_years, positions[body_index].copy())
+        )
+
+    elif property_name == "velocity":
+        velocities[body_index, component] = app_data
+
+    elif property_name == "mass":
+        masses[body_index] = app_data
+
+        for i in range(NUM_BODIES):
+            history[i].clear()
+            history[i].append(
+                (simulation_years, positions[i].copy())
+            )
+
+    elif property_name == "size":
+        body_sizes[body_index] = app_data
+
+#reset
+def reset_simulation():
+    global simulation_years, step_accumulator, paused
+    global last_trail_update
+
+    positions[:] = initial_positions
+    velocities[:] = initial_velocities
+    masses[:] = initial_masses
+    body_sizes[:] = initial_body_sizes
+
+    simulation_years = 0.0
+    step_accumulator = 0.0
+    paused = False
+
+    for i in range(NUM_BODIES):
+        history[i].clear()
+
+        # Two identical starting points make the trajectory visible immediately.
+        start_position = positions[i].copy()
+
+        history[i].append((simulation_years, start_position.copy()))
+        history[i].append((simulation_years + DT, start_position.copy()))
+
+    update_trails()
+    last_trail_update = time.time()      
+
+def add_body_controls(body_index, body_name):
+    with dpg.collapsing_header(label=body_name, default_open=False):
+
+        dpg.add_text("Position (AU)")
+
+        for axis, component in zip(["X", "Y", "Z"], range(3)):
+            dpg.add_input_float(
+                label=f"Position {axis}",
+                default_value=float(positions[body_index, component]),
+                callback=set_body_value,
+                user_data=("position", body_index, component),
+                width=200
+            )
+
+        dpg.add_separator()
+        dpg.add_text("Velocity (AU/year)")
+
+        for axis, component in zip(["X", "Y", "Z"], range(3)):
+            dpg.add_input_float(
+                label=f"Velocity {axis}",
+                default_value=float(velocities[body_index, component]),
+                callback=set_body_value,
+                user_data=("velocity", body_index, component),
+                width=200
+            )
+
+        dpg.add_separator()
+
+        dpg.add_input_float(
+            label="Mass (solar masses)",
+            default_value=float(masses[body_index]),
+            callback=set_body_value,
+            user_data=("mass", body_index, None),
+            width=200
+        )
+
+        dpg.add_input_float(
+            label="Visual Size",
+            default_value=float(body_sizes[body_index]),
+            callback=set_body_value,
+            user_data=("size", body_index, None),
+            width=200
+        )
+
+       
+
 
 # ============================================================
 # LIGHT-TRAVEL-TIME HISTORY FOR THE THREE STARS
 # ============================================================
 
 OBSERVER = np.array([0.0, 0.0, -100.0], dtype=np.float64)
+
+
 
 def apparent_position(body_index, current_time, body_history):
     """Approximate retarded position for a star."""
@@ -424,15 +539,19 @@ def update_trails():
     for i in range(NUM_BODIES):
         if trail_vaos[i] is not None:
             trail_vaos[i].release()
+            trail_vaos[i] = None
+
+        if trail_buffers[i] is not None:
             trail_buffers[i].release()
+            trail_buffers[i] = None
+
+        if len(history[i]) < 2:
+            continue
 
         points = np.array(
             [entry[1] for entry in history[i]],
             dtype=np.float32,
         )
-
-        if len(points) < 2:
-            continue
 
         color = np.array(body_colors[i], dtype=np.float32)
         colors = np.tile(color, (len(points), 1))
@@ -489,9 +608,113 @@ glfw.set_cursor_pos_callback(window, cursor_position_callback)
 glfw.set_scroll_callback(window, scroll_callback)
 
 # ============================================================
+# control pannel
+# ============================================================
+def run_control_panel():
+    global paused, time_scale
+
+    dpg.create_context()
+
+    with dpg.window(label="Simulation Controls", width=450, height=800):
+
+        def toggle_pause():
+            global paused
+            paused = not paused
+            dpg.set_item_label(
+                "pause_button",
+                "Resume" if paused else "Pause"
+            )
+        dpg.add_button(
+            label="Reset Simulation",
+            callback=reset_simulation
+        )   
+
+        dpg.add_button(
+            label="Pause",
+            tag="pause_button",
+            callback=toggle_pause
+        )
+
+        dpg.add_slider_float(
+            label="Time Speed",
+            min_value=0.1,
+            max_value=10.0,
+            default_value=1.0,
+            callback=lambda s, a: set_time_scale(a)
+        )
+
+        dpg.add_checkbox(
+            label="Show Trajectories",
+            default_value=True,
+            callback=lambda s, a: set_show_trails(a)
+        )
+
+        dpg.add_separator()
+
+        dpg.add_text("STAR SYSTEM")
+
+        for i in range(NUM_STARS):
+            add_body_controls(i, f"Star {i + 1}")
+
+        dpg.add_separator()
+
+        dpg.add_text("PLANETS")
+
+        for i in range(NUM_STARS, NUM_BODIES):
+            add_body_controls(i, f"Planet {i - NUM_STARS + 1}")
+
+    dpg.create_viewport(
+        title="Simulation Controls",
+        width=470,
+        height=850
+    )
+
+    dpg.setup_dearpygui()
+    dpg.show_viewport()
+
+    while dpg.is_dearpygui_running():
+        dpg.render_dearpygui_frame()
+
+    dpg.destroy_context()
+
+
+def set_time_scale(value):
+    global time_scale
+    time_scale = value
+
+
+def set_star_scale(value):
+    global star_scale
+    star_scale = value
+
+
+def set_planet_scale(value):
+    global planet_scale
+    planet_scale = value
+
+
+def set_show_planets(value):
+    global show_planets
+    show_planets = value
+
+
+def set_show_trails(value):
+    global show_trails
+    show_trails = value
+
+
+#============================================================
+#console thread
+#============================================================
+control_thread = threading.Thread(
+    target=run_control_panel,
+    daemon=True
+)
+
+control_thread.start()
+# ============================================================
 # MAIN LOOP
 # ============================================================
-
 try:
     while not glfw.window_should_close(window):
         glfw.poll_events()
@@ -499,27 +722,46 @@ try:
         if glfw.get_key(window, glfw.KEY_ESCAPE) == glfw.PRESS:
             break
 
-        # Advance all 13 bodies using mutual gravity.
-        for _ in range(STEPS_PER_FRAME):
-            physics_step()
-            simulation_years += DT
+        # ==========================================
+        # ADVANCE ALL 13 BODIES
+        # ==========================================
 
-            for i in range(NUM_BODIES):
-                history[i].append(
-                    (simulation_years, positions[i].copy())
-                )
+        if not paused:
 
-                if len(history[i]) > TRAIL_LENGTH:
-                    history[i].pop(0)
+            steps = max(1, int(STEPS_PER_FRAME * time_scale))
 
-        # Refresh trajectory buffers periodically.
+            for _ in range(steps):
+
+                # Advance physics by one timestep
+                physics_step()
+                
+       
+                simulation_years += DT
+
+                # Save trajectory history
+                for i in range(NUM_BODIES):
+                    history[i].append(
+                        (simulation_years, positions[i].copy())
+                    )
+
+                    if len(history[i]) > TRAIL_LENGTH:
+                        history[i].pop(0)
+
+        # ==========================================#
+        # REFRESH TRAJECTORY BUFFERS
+        # ==========================================#
+
+
         now = time.time()
+
         if now - last_trail_update >= TRAIL_UPDATE_INTERVAL:
             update_trails()
             last_trail_update = now
 
-        # Use light-travel-time positions for the three stars.
-        # Planets use their current positions.
+        # ==========================================
+        # LIGHT-TRAVEL-TIME POSITIONS
+        # ==========================================
+
         displayed_positions = positions.copy()
 
         for i in range(NUM_STARS):
@@ -535,7 +777,10 @@ try:
 
         body_buffer.write(body_data.tobytes())
 
-        # Camera.
+        # ==========================================
+        # CAMERA
+        # ==========================================
+
         eye = np.array([
             camera_distance * math.cos(camera_pitch) * math.sin(camera_yaw),
             camera_distance * math.sin(camera_pitch),
@@ -559,18 +804,18 @@ try:
         ctx.viewport = (0, 0, width, height)
         ctx.clear(0.005, 0.007, 0.02, 1.0)
 
-        # Background.
+        # Background
         background_vao.render(
             mode=moderngl.POINTS,
             vertices=NUM_BACKGROUND_STARS,
         )
 
-        # Trajectory trails for stars and planets.
+        # Trajectory trails
         for vao in trail_vaos:
             if vao is not None:
                 vao.render(mode=moderngl.LINE_STRIP)
 
-        # Main bodies.
+        # Main bodies
         body_vao.render(
             mode=moderngl.POINTS,
             vertices=NUM_BODIES,
@@ -599,6 +844,12 @@ finally:
     point_program.release()
     line_program.release()
     ctx.release()
+
+    glfw.destroy_window(window)
+    glfw.terminate()
+
+
+
 
     glfw.destroy_window(window)
     glfw.terminate()
