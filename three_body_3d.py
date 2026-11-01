@@ -82,6 +82,11 @@ void main() {
 # ============================================================
 
 star_masses = np.array([1.0, 0.8, 1.2], dtype=np.float64)
+star_densities = np.array([
+    1.41,  # Star 1
+    1.41,  # Star 2
+    1.41,  # Star 3
+], dtype=np.float64)
 
 star_positions = np.array([
     [-0.8, 0.0, 0.3],
@@ -228,6 +233,27 @@ for mass, density in zip(planet_masses, planet_densities):
 
 planet_radii_au = np.array(planet_radii_au)
 
+star_radii_au = []
+
+for mass, density in zip(star_masses, star_densities):
+    mass_kg = mass * SOLAR_MASS_KG
+    density_kg_m3 = density * 1000.0
+
+    radius_m = (
+        3.0 * mass_kg / (4.0 * math.pi * density_kg_m3)
+    ) ** (1.0 / 3.0)
+
+    star_radii_au.append(radius_m / AU_METERS)
+
+star_radii_au = np.array(star_radii_au)
+
+collision_radii = np.concatenate([
+    star_radii_au,
+    planet_radii_au
+])
+
+
+
 # ============================================================
 # GRAVITY FOR ALL 13 BODIES
 # ============================================================
@@ -251,13 +277,36 @@ def acceleration(pos):
 
 def physics_step():
     # Velocity-Verlet / leapfrog-style integration.
-    global positions, velocities
+    global positions, velocities, paused
 
     a0 = acceleration(positions)
     velocities += 0.5 * a0 * DT
     positions += velocities * DT
+
+    # Check for collisions at the new positions.
+    collision = detect_collision(positions)
+
+    if collision is not None:
+        body_a, body_b = collision
+        print(f"COLLISION! Body {body_a} and Body {body_b}")
+        paused = True
+        return
+
     a1 = acceleration(positions)
     velocities += 0.5 * a1 * DT
+
+#collision detection
+def detect_collision(pos):
+    for i in range(NUM_BODIES):
+        for j in range(i + 1, NUM_BODIES):
+            distance = np.linalg.norm(pos[i] - pos[j])
+
+            minimum_distance = collision_radii[i] + collision_radii[j]
+
+            if distance <= minimum_distance:
+                return i, j
+
+    return None    
 
 #body controls init for gui
 
@@ -565,17 +614,30 @@ def update_trails():
         )
 
 
+
 # ============================================================
-# CAMERA CONTROLS
+# FREE-FLY CAMERA CONTROLS
 # ============================================================
 
-camera_yaw = 0.6
-camera_pitch = 0.35
-camera_distance = 4.5
+camera_position = np.array([0.0, 0.0, 4.5], dtype=np.float64)
+
+camera_yaw = -math.pi / 2
+camera_pitch = 0.0
+
+camera_speed = 2.0
+mouse_sensitivity = 0.003
 
 mouse_down = False
 last_mouse_x = 0.0
 last_mouse_y = 0.0
+
+
+def get_camera_forward():
+    return np.array([
+        math.cos(camera_yaw) * math.cos(camera_pitch),
+        math.sin(camera_pitch),
+        math.sin(camera_yaw) * math.cos(camera_pitch),
+    ], dtype=np.float64)
 
 
 def mouse_button_callback(window, button, action, mods):
@@ -587,24 +649,66 @@ def mouse_button_callback(window, button, action, mods):
 
 
 def cursor_position_callback(window, x, y):
-    global camera_yaw, camera_pitch, last_mouse_x, last_mouse_y
+    global camera_yaw, camera_pitch
+    global last_mouse_x, last_mouse_y
 
     if mouse_down:
-        camera_yaw += (x - last_mouse_x) * 0.005
-        camera_pitch += (y - last_mouse_y) * 0.005
-        camera_pitch = float(np.clip(camera_pitch, -1.5, 1.5))
+        camera_yaw += (x - last_mouse_x) * mouse_sensitivity
+        camera_pitch -= (y - last_mouse_y) * mouse_sensitivity
 
-    last_mouse_x, last_mouse_y = x, y
+        camera_pitch = float(np.clip(
+            camera_pitch, -1.5, 1.5
+        ))
+
+    last_mouse_x = x
+    last_mouse_y = y
 
 
 def scroll_callback(window, x_offset, y_offset):
-    global camera_distance
-    camera_distance *= math.exp(-y_offset * 0.1)
-    camera_distance = float(np.clip(camera_distance, 0.5, 30.0))
+    global camera_position
+
+    forward = get_camera_forward()
+    camera_position += forward * y_offset * 0.5
+
+
+def update_camera(delta_time):
+    global camera_position
+
+    forward = get_camera_forward()
+
+    world_up = np.array([0.0, 1.0, 0.0])
+
+    right = np.cross(forward, world_up)
+    right /= np.linalg.norm(right)
+
+    movement = np.zeros(3, dtype=np.float64)
+
+    if glfw.get_key(window, glfw.KEY_W) == glfw.PRESS:
+        movement += forward
+
+    if glfw.get_key(window, glfw.KEY_S) == glfw.PRESS:
+        movement -= forward
+
+    if glfw.get_key(window, glfw.KEY_D) == glfw.PRESS:
+        movement += right
+
+    if glfw.get_key(window, glfw.KEY_A) == glfw.PRESS:
+        movement -= right
+
+    if glfw.get_key(window, glfw.KEY_SPACE) == glfw.PRESS:
+        movement += world_up
+
+    if glfw.get_key(window, glfw.KEY_LEFT_CONTROL) == glfw.PRESS:
+        movement -= world_up
+
+    if np.linalg.norm(movement) > 0:
+        movement /= np.linalg.norm(movement)
+        camera_position += movement * camera_speed * delta_time
 
 
 glfw.set_mouse_button_callback(window, mouse_button_callback)
 glfw.set_cursor_pos_callback(window, cursor_position_callback)
+glfw.set_scroll_callback(window, scroll_callback)
 glfw.set_scroll_callback(window, scroll_callback)
 
 # ============================================================
@@ -712,6 +816,8 @@ control_thread = threading.Thread(
 )
 
 control_thread.start()
+#frame pass
+last_frame_time = glfw.get_time()
 # ============================================================
 # MAIN LOOP
 # ============================================================
@@ -776,18 +882,17 @@ try:
         ]).astype(np.float32)
 
         body_buffer.write(body_data.tobytes())
+        current_time = glfw.get_time()
+        delta_time = current_time - last_frame_time
+        last_frame_time = current_time
 
-        # ==========================================
+        update_camera(delta_time)
+
         # CAMERA
-        # ==========================================
+        
 
-        eye = np.array([
-            camera_distance * math.cos(camera_pitch) * math.sin(camera_yaw),
-            camera_distance * math.sin(camera_pitch),
-            camera_distance * math.cos(camera_pitch) * math.cos(camera_yaw),
-        ], dtype=np.float32)
+        forward = get_camera_forward()
 
-        target = np.zeros(3, dtype=np.float32)
         up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
 
         width, height = glfw.get_framebuffer_size(window)
@@ -795,7 +900,13 @@ try:
         height = max(height, 1)
 
         projection = perspective(60.0, width / height, 0.01, 100.0)
-        view = look_at(eye, target, up)
+
+        view = look_at(
+             camera_position,
+             camera_position + forward,
+             up
+             )
+
         mvp = projection @ view
 
         point_program["mvp"].write(mvp.T.astype("f4").tobytes())
@@ -806,9 +917,10 @@ try:
 
         # Background
         background_vao.render(
-            mode=moderngl.POINTS,
-            vertices=NUM_BACKGROUND_STARS,
-        )
+              mode=moderngl.POINTS,
+              vertices=NUM_BACKGROUND_STARS,
+            )
+        
 
         # Trajectory trails
         for vao in trail_vaos:
