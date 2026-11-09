@@ -417,6 +417,7 @@ system_names = [
     "Ghostline",
     "Chrome Orchard",
     "Nightmarket",
+    "The Major Leagues",
 ]
 
 system_star_indices = [list(range(len(star_masses)))]
@@ -471,18 +472,55 @@ for system_index, system_name in enumerate(system_names[1:]):
         tangent = np.cross(direction, reference)
     tangent /= np.linalg.norm(tangent)
 
-    distance = system_rng.uniform(25.0, 200.0)
+    is_major_leagues = system_name == "The Major Leagues"
+
+    distance = (
+        400.0
+        if is_major_leagues
+        else system_rng.uniform(25.0, 200.0)
+    )
     system_position = central_position + direction * distance
     system_velocity = (
         central_velocity
         + tangent * np.sqrt(G * central_mass / distance)
     )
 
-    star_mass = float(np.exp(system_rng.uniform(np.log(0.2), np.log(1.4))))
+    star_mass = (
+        2.0
+        if is_major_leagues
+        else float(np.exp(system_rng.uniform(np.log(0.2), np.log(1.4))))
+    )
+    companion_mass = 1.6 if is_major_leagues else 0.0
+    planet_central_mass = star_mass + companion_mass
+
+    first_star_index = len(star_masses) + len(extra_star_masses)
+
+    if is_major_leagues:
+        binary_separation = 0.12
+        binary_normal = np.cross(direction, tangent)
+        binary_normal /= np.linalg.norm(binary_normal)
+        relative_speed = np.sqrt(
+            G * planet_central_mass / binary_separation
+        )
+
+        primary_position = (
+            system_position
+            - (companion_mass / planet_central_mass)
+            * binary_separation * tangent
+        )
+        primary_velocity = (
+            system_velocity
+            - (companion_mass / planet_central_mass)
+            * relative_speed * binary_normal
+        )
+    else:
+        primary_position = system_position
+        primary_velocity = system_velocity
+
     extra_star_masses.append(star_mass)
     extra_star_densities.append(1.41 * star_mass ** -1.4)
-    extra_star_positions.append(system_position)
-    extra_star_velocities.append(system_velocity)
+    extra_star_positions.append(primary_position)
+    extra_star_velocities.append(primary_velocity)
 
     if star_mass < 0.45:
         extra_star_colors.append((1.0, 0.32, 0.12))
@@ -493,13 +531,36 @@ for system_index, system_name in enumerate(system_names[1:]):
     else:
         extra_star_colors.append((0.66, 0.78, 1.0))
 
-    extra_star_sizes.append(float(np.clip(42.0 * star_mass**0.8, 16, 48)))
+    extra_star_sizes.append(
+        100.0 if is_major_leagues
+        else float(np.clip(42.0 * star_mass**0.8, 16, 48))
+    )
 
-    system_star_indices.append([len(star_masses) + system_index])
+    if is_major_leagues:
+        extra_star_masses.append(companion_mass)
+        extra_star_densities.append(1.41 * companion_mass ** -1.4)
+        extra_star_positions.append(
+            system_position
+            + (star_mass / planet_central_mass)
+            * binary_separation * tangent
+        )
+        extra_star_velocities.append(
+            system_velocity
+            + (star_mass / planet_central_mass)
+            * relative_speed * binary_normal
+        )
+        extra_star_colors.append((1.0, 0.66, 0.38))
+        extra_star_sizes.append(90.0)
+        system_star_indices.append([first_star_index, first_star_index + 1])
+        planet_count = 7
+        inner_radius = 0.55
+        outer_radius = 4.0
+    else:
+        system_star_indices.append([first_star_index])
+        planet_count = int(system_rng.integers(2, 9))
+        inner_radius = system_rng.uniform(0.08, 0.18)
+        outer_radius = system_rng.uniform(0.8, 3.0)
 
-    planet_count = int(system_rng.integers(2, 9))
-    inner_radius = system_rng.uniform(0.08, 0.18)
-    outer_radius = system_rng.uniform(0.8, 3.0)
     orbit_radii = np.geomspace(inner_radius, outer_radius, planet_count)
     orbit_radii *= system_rng.uniform(0.92, 1.08, size=planet_count)
     orbit_radii.sort()
@@ -560,9 +621,9 @@ for system_index, system_name in enumerate(system_names[1:]):
             system_position + orbit_radius * radial
         )
         planet_velocities.append(
-            system_velocity
-            + np.sqrt(G * star_mass / orbit_radius) * orbital_tangent
-        )
+         system_velocity
+        + np.sqrt(G * planet_central_mass / orbit_radius) * orbital_tangent
+)
 
     system_planet_indices.append(this_system_planets)
 
